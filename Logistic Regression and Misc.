@@ -1,0 +1,182 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This code was written by: Arielle Thibeault, Nathan Liittschwager.
+The following portion of code loads in the appropriate data sets, merges them into one data frame, and renames the columns for computational purposes.
+
+```{r}
+install.packages("ggplot2")
+install.packages("ROCR")
+install.packages("lubridate")
+install.packages("caret")
+install.packages("e1071")
+install.packages("dplyr")
+install.packages("safeBinaryRegression")
+install.packages("arm")
+
+library(ggplot2)
+library(ROCR)
+library(lubridate)
+library(caret)
+library(e1071)
+library(dplyr)
+library(safeBinaryRegression)
+library(arm)
+
+library(readr)
+Projects <- read_csv("Downloads/Projects.csv", 
+                     +     col_types = cols(`Project Essay` = col_skip(), 
+                                            +         `Project Need Statement` = col_skip(), 
+                                            +         `Project Short Description` = col_skip(), 
+                                            +         `Project Subject Subcategory Tree` = col_skip(), 
+                                            +         `Project Title` = col_skip()))
+
+Schools <- read_csv("Downloads/Schools.csv")
+
+
+data <- merge(Projects, Schools, by = "School ID")
+
+names(data) <- c("school.id", "project.id", "teacher.id", "teacher.proj.seq", "project.type", "project.subject", "project.grade", "project.resource", "project.cost", "project.start.date", "project.exp.date", "project.status", "project.funded.date", "school.name", "school.metro.type", "school.percent.lunch", "school.state", "school.zip", "school.city", "school.county", "school.district" )
+
+```
+
+Next, we focus on cleaning up the data:
+For our analysis, we remove the projects marked "Live" and the values marked "NA" as, at present, we have no use for these values. Finally, the project subject category is cleaned using a more defined category list of 8 distinct values rather than the previous 51.
+
+```{r}
+datacode <- dplyr::filter(data, project.status != "Live")
+datacode <- dplyr::filter(datacode, !is.na(project.status))
+datacode <- dplyr::filter(datacode, !is.na(project.subject))
+datacode$project.status <- as.factor(datacode$project.status)
+levels(datacode$project.status)
+contrasts(datacode$project.status)
+
+datacode <- dplyr::filter(datacode, !is.na(project.resource))
+datacode <- dplyr::filter(datacode, !is.na(school.metro.type))
+datacode <- dplyr::filter(datacode, !is.na(school.percent.lunch))
+datacode <- dplyr::filter(datacode, !is.na(school.state))
+datacode <- dplyr::filter(datacode, school.metro.type != "unknown")
+
+project_subj <- c("Applied Learning" = "Applied Learning","Math & Science" = "Math & Science", "History & Civics" = "History & Civics", "Health & Sports" = "Health & Sports", "Special Needs" = "Special Needs", "Literacy & Language" = "Literacy & Language", "Warmth, Care & Hunger" = "Warmth, Care & Hunger", "Music & The Arts" = "Music & The Arts",  "Applied Learning, Literacy & Language" = "Applied Learning", "History & Civics, Math & Science" = "History & Civics", "Literacy & Language, Special Needs" = "Special Needs", 
+                  "Applied Learning, Special Needs" = "Special Needs", "Health & Sports, Special Needs" = "Special Needs", 
+                  "Math & Science, Literacy & Language" = "Math & Science", "Literacy & Language, Math & Science" = "Literacy & Language", "Literacy & Language, Music & The Arts" = "Music & The Arts", "Math & Science, Special Needs" = "Special Needs", "Math & Science, Applied Learning" = "Math & Science", 
+                  "Literacy & Language, Applied Learning" = "Literacy & Language", "Applied Learning, Music & The Arts" = "Music & The Arts", "History & Civics, Literacy & Language" = "History & Civics", "Applied Learning, Math & Science" = "Applied Learning", "Health & Sports, Math & Science" = "Health & Sports", "Applied Learning, Health & Sports" = "Health & Sports", "History & Civics, Music & The Arts" = "History & Civics", "Math & Science, History & Civics" = "Math & Science", "Math & Science, Music & The Arts" = "Music & The Arts", "Special Needs, Music & The Arts" = "Special Needs", "History & Civics, Applied Learning" = "History & Civics", "History & Civics, Special Needs" = "Special Needs", "Music & The Arts, Special Needs" = "Special Needs", "Literacy & Language, Health & Sports" = "Literacy & Language", "Math & Science, Health & Sports" = "Math & Science", "Health & Sports, Literacy & Language" = "Health & Sports", "Applied Learning, History & Civics" = "Applied Learning", "Music & The Arts, History & Civics" = "Music & The Arts", "Health & Sports, Applied Learning" = "Health & Sports", "Music & The Arts, Applied Learning" = "Music & The Arts", "Health & Sports, Music & The Arts" = "Health & Sports", "Special Needs, Health & Sports" = "Special Needs", "History & Civics, Health & Sports" = "History & Civics", "Music & The Arts, Health & Sports" = "Music & The Arts", "Health & Sports, History & Civics" = "Health & Sports", "Health & Sports, Warmth, Care & Hunger" = "Warmth, Care & Hunger", "Special Needs, Warmth, Care & Hunger" = "Special Needs", "Math & Science, Warmth, Care & Hunger" = "Warmth, Care & Hunger", "Applied Learning, Warmth, Care & Hunger" = "Warmth, Care & Hunger", 
+                  "Literacy & Language, Warmth, Care & Hunger" = "Warmth, Care & Hunger", "History & Civics, Warmth, Care & Hunger" = "Warmth, Care & Hunger", 
+                  "Music & The Arts, Warmth, Care & Hunger" = "Music & The Arts", "Literacy & Language, History & Civics" = "Literacy & Language")
+datacode$proj.subj.clean <- as.character(project_subj[datacode$project.subject])
+```
+
+Converting the time data from continuous to discrete "bins" gives us a better result for the multiple regression. Additionally, the column "Project Time Up" is created and the small outliers are removed as they unnecessarily skew the weight of the variable.
+
+```{r}
+datacode$proj.time.up <- datacode$project.exp.date - datacode$project.start.date
+datacode <- dplyr::filter(datacode, proj.time.up > 6)
+datacode$week.start.date <- as.factor(week(datacode$project.start.date))
+datacode$year.start.date <- as.factor(year(datacode$project.start.date))
+
+datacode$week.start.date <- as.factor(datacode$week.start.date)
+datacode$year.start.date <- as.factor(datacode$year.start.date)
+datacode$project.status <- make.names(datacode$project.status)
+datacode$project.status <- as.factor(datacode$project.status)
+```
+
+The training and testing sets for the generalized linear regression are defined and the model is run.
+
+```{r}
+bigtrainset <- createDataPartition(datacode$project.status, p = 0.50, list = FALSE)
+summary(datacode[bigtrainset,])
+bigtest <- datacode[-bigtrainset,]
+
+train_control <- trainControl(method = "cv", number = 10, savePredictions = "none", summaryFunction = twoClassSummary, classProbs = TRUE)
+glm.model <- train(project.status ~ project.cost + project.grade + school.metro.type + school.percent.lunch +school.state + proj.subj.clean + proj.time.up + week.start.date + year.start.date + teacher.proj.seq + project.type, data = datacode, subset = bigtrainset, metric = "ROC", method = "glm", family = "binomial", trControl = train_control)
+glm.model
+summary(glm.model)
+
+prediction <- predict(glm.model, newdata = bigtest, response = "raw")
+confusionMatrix(prediction, bigtest$project.status)
+```
+
+Below are attempts at visualization utilizing methods other than the standard for regression as perfect seperation causes probabilistic extremes. They were unsuccessful.
+
+```{r}
+#a <- glm(project.status ~ project.cost, family = binomial, weights = NULL, data = datacode, start = NULL, method = "glm.fit", x = FALSE, y = TRUE, contrasts = NULL, separation = "test")
+#plot(a)
+
+#b <- glm(project.status ~ project.cost, data = datacode,  family=binomial, separation="find")
+
+#fit <- bayesglm(project.status ~ project.cost + teacher.proj.seq, data=datacode, family="binomial")
+#display(fit)
+#plot(fit)
+
+#datacode$project.status <- as.factor(datacode$project.status)
+#sample_df <- dplyr::filter(datacode, project.status != "Live")
+#sample_df <- dplyr::filter(datacode, !is.na(project.status))
+#sample_df$project.status <- as.factor(sample_df$project.status)
+#View(sample_df)
+#subsample_df<-sample_df[sample.int(nrow(sample_df),size=100,replace=FALSE),]
+#plot(subsample_df$project.cost, subsample_df$project.status)
+```
+
+Below are some descriptive statistics illusrating patterns of data and just generally what's going on
+
+```{r}
+#histogram of cost for fully funded projects
+sample_2 <- dplyr::filter(datacode, project.status == "Fully Funded")
+mean(sample_2$project.cost) #645.1027
+qplot(sample_2$project.cost, geom= "histogram", main = "Cost Distribution of Fully Funded Projects", xlab = "Project Cost", ylab = "Number of Fully Funded Projects") + 
+  xlim(0, 2000) +
+  geom_histogram(aes(fill = ..count..)) + 
+  scale_fill_gradient("Count", low = "black", high = "firebrick2")
+
+#boxplots
+sample_3 <- dplyr::filter(datacode, school.metro.type != "unknown")
+boxplot(school.percent.lunch~school.metro.type, data=sample_3, notch=TRUE, main="Percent of Student Body on Free Lunch", xlab="School Metropolitan Type", names=c("Rural", "Suburban", "Town", "Urban"))
++ abline(a = 50, b = 0, col = "red", lty = "dashed")
+
+boxplot(project.cost~project.resource, data=datacode, notch = TRUE)
+subsample_1 <- dplyr::filter(datacode, project.resource == "Technology")
+mean(subsample_1$project.cost) #999.5529
+sd(subsample_1$project.cost) #1209.092
+summary(subsample_1$project.cost)
+lb <- 999.5529 - (1.645*1209.092)/sqrt(299032)
+ub <- 999.5529 + (1.645*1209.092)/sqrt(299032)
+CI <- c(995.9157, 1003.19)
+
+subsample_2 <- dplyr::filter(datacode, project.resource == "Books")
+mean(subsample_2$project.cost) #539.611
+sd(subsample_2$project.cost) #480.4768
+summary(subsample_2$project.cost)
+
+subsample_3 <- dplyr::filter(datacode, proj.subj.clean == "Math & Science")
+mean(subsample_3$project.cost) #823.699
+sd(subsample_3$project.cost) #1044.376
+summary(subsample_3$project.cost)
+
+subsample_4 <- dplyr::filter(datacode, proj.subj.clean == "Literacy & Language")
+mean(subsample_4$project.cost) #674.4507
+sd(subsample_4$project.cost) #839.9946
+summary(subsample_4$project.cost)
+
+subsample_5 <- dplyr::filter(datacode, proj.subj.clean == "Applied Learning")
+mean(subsample_5$project.cost) #745.3638
+sd(subsample_5$project.cost) #1174.169
+CI_5 <- c(0, 2676.872)
+summary(subsample_5$project.cost)
+
+subsample_6 <- dplyr::filter(datacode, proj.subj.clean == "Warmth, Care & Hunger")
+mean(subsample_6$project.cost) #548.7495
+sd(subsample_6$project.cost) #712.743
+CI_6 <- c(0, 1721.2117)
+
+table(datacode$proj.subj.clean)
+p_ll <- 410321/1068124 #0.3841511
+sigma_pll <- sqrt((p_ll*(1-p_ll))/1068124) #0.0004706275
+CI_ll <- c(p_ll - 1.645*sigma_pll, p_ll + 1.645*sigma_pll)
+
+p_ms <- 217896/1068124 #0.2039988
+sigma_ms <- sqrt((p_ms*(1-p_ms))/1068124) #0.0003899059
+CI_ms <- c(p_ms - 1.645*sigma_ms, p_ms + 1.645*sigma_ms)
+
+sd(datacode$project.cost) #1082.457
